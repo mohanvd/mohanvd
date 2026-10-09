@@ -1,6 +1,6 @@
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="./window/window-dark.svg">
-  <img alt="A window looking out over the sea in Alexandria, redrawn every hour from the current weather, the sun's position and the moon's phase." src="./window/window-light.svg" width="100%">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/mohanvd/mohanvd/window/window-dark.svg">
+  <img alt="A window looking out over the sea in Alexandria, redrawn every hour from the current weather, the sun's position and the moon's phase." src="https://raw.githubusercontent.com/mohanvd/mohanvd/window/window-light.svg" width="100%">
 </picture>
 
 ## Hey, I'm Mohanad
