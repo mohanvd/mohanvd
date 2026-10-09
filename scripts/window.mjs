@@ -123,7 +123,17 @@ function moonPhase(utc) {
   const synodic = 29.530588853;
   const age = (((utc - Date.UTC(2000, 0, 6, 18, 14)) / DAY) % synodic + synodic) % synodic;
   const p = age / synodic;
-  return { lit: (1 - Math.cos(2 * Math.PI * p)) / 2, waxing: p < 0.5 };
+  return { p, lit: (1 - Math.cos(2 * Math.PI * p)) / 2, waxing: p < 0.5 };
+}
+
+// The moon follows the sun's path but runs late by its age: a new moon is up
+// all day, a full moon all night, a first quarter from noon to midnight.
+function moonArc(t, events, p) {
+  let at = t.local - p * DAY;
+  if (at < events[0].at) at += DAY;
+  const prev = events.filter((e) => e.at <= at).at(-1);
+  const next = events.find((e) => e.at > at);
+  return { up: prev.kind === "rise", f: (at - prev.at) / (next.at - prev.at) };
 }
 
 // ------------------------------------------------------------------ color
@@ -166,7 +176,7 @@ const W = 900, SH = 330, H = 420, HZ = 232, BASE = HZ - 7;
 const SANS = "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif";
 const MONO = "ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace";
 
-function scene({ m, weather, moon }) {
+function scene({ m, weather, moon, day }) {
   const code = weather?.code ?? 0;
   const rain = isRain(code), storm = isStorm(code), fog = isFog(code);
   const cloud = clamp((weather?.cloud ?? 10) / 100);
@@ -175,12 +185,16 @@ function scene({ m, weather, moon }) {
   const glow = clamp(1 - Math.abs(m.elev) / 0.22) * (1 - cloud * 0.7) * (rain || fog ? 0.2 : 1);
 
   const grey = rain ? mix("#12161d", "#5d6875", dayness) : fog ? mix("#2a2f38", "#c1c8cf", dayness) : mix("#1a1f2a", "#9aa6b4", dayness);
-  const overcast = clamp(cloud * 0.2 + clamp((cloud - 0.5) / 0.5) * 0.45 + (rain ? 0.35 : 0) + (storm ? 0.15 : 0) + (fog ? 0.55 : 0));
+  const overcast = clamp(cloud * 0.2 + clamp((cloud - 0.5) / 0.5) * 0.65 + (rain ? 0.35 : 0) + (storm ? 0.15 : 0) + (fog ? 0.55 : 0));
   const sky = [top, mid, bottom].map((c) => mix(c, grey, overcast));
   const hidden = rain || cloud > 0.9;
-  let seaTop = mix(sky[2], mix("#04101f", "#0f4c74", dayness), 0.62);
-  const warm = clamp(1 - Math.abs(m.elev) / 0.3) * (1 - cloud * 0.7) * (rain || fog ? 0 : 1);
-  seaTop = mix(seaTop, mix(sky[2], "#2b3354", 0.45), warm * 0.7);
+  // Low sun: the water takes the cooler sky above the horizon band, or orange on navy turns to mud.
+  const low = clamp(1 - Math.abs(m.elev) / 0.3);
+  const water = mix(sky[2], sky[1], low * clamp(m.elev / 0.08));
+  const deep = mix(mix("#04101f", "#0f4c74", dayness), mix(grey, "#000000", 0.5), overcast * 0.6);
+  let seaTop = mix(water, deep, 0.62);
+  const warm = low * (1 - cloud * 0.7) * (rain || fog ? 0 : 1);
+  seaTop = mix(seaTop, mix(water, "#2b3354", 0.45), warm * 0.7);
   const seaBot = mix(seaTop, "#020610", 0.55);
   const stone = mix(seaTop, "#000000", 0.55 - dayness * 0.15);
   const far = mix(stone, sky[2], 0.32);
@@ -214,12 +228,13 @@ function scene({ m, weather, moon }) {
     if (!hidden) parts.push(`<circle cx="${n1(sunX)}" cy="${n1(y)}" r="70" fill="url(#sunglow)" opacity="${o}"/>`,
       `<circle cx="${n1(sunX)}" cy="${n1(y)}" r="19" fill="${col}" opacity="${hidden ? 0 : o}"/>`);
     body = hidden ? null : { x: sunX, col, strength: clamp(1 - cloud * 0.8) * (fog ? 0.25 : 1) };
-  } else {
-    const x = W - 110 - m.f * (W - 220), y = HZ - 40 - Math.sin(Math.PI * m.f) * 140, r = 14;
+  } else if (moon.up) {
+    const x = W - 110 - moon.f * (W - 220), y = HZ - Math.sin(Math.PI * moon.f) * 175, r = 14;
     const o = n1(1 - cloud * 0.7);
     const rx = n1(r * Math.abs(1 - 2 * moon.lit));
-    const term = (moon.lit < 0.5) !== moon.waxing ? 1 : 0;
-    const path = `M${n1(x)} ${n1(y - r)}A${r} ${r} 0 0 ${moon.waxing ? 1 : 0} ${n1(x)} ${n1(y + r)}A${rx} ${r} 0 0 ${term} ${n1(x)} ${n1(y - r)}Z`;
+    const right = !moon.waxing; // the bright limb faces the sun, which is west (left) of a waxing moon
+    const term = (moon.lit < 0.5) !== right ? 1 : 0;
+    const path = `M${n1(x)} ${n1(y - r)}A${r} ${r} 0 0 ${right ? 1 : 0} ${n1(x)} ${n1(y + r)}A${rx} ${r} 0 0 ${term} ${n1(x)} ${n1(y - r)}Z`;
     if (!hidden && !fog) parts.push(`<circle cx="${n1(x)}" cy="${n1(y)}" r="60" fill="url(#moonglow)" opacity="${n1(o * moon.lit * 0.9)}"/>`,
       `<circle cx="${n1(x)}" cy="${n1(y)}" r="${r}" fill="#c9cfdd" opacity="${hidden || fog ? 0 : n1(o * 0.1)}"/>`,
       `<path d="${path}" fill="#f1ecdc" opacity="${hidden || fog ? 0 : o}"/>`);
@@ -228,10 +243,11 @@ function scene({ m, weather, moon }) {
 
   // clouds
   if (cloud > 0.1) {
-    const r = rng(11), count = Math.round(2 + cloud * 8 + (rain ? 6 : 0));
-    const fill = rain ? mix(grey, "#000000", 0.12) : mix(mix(mix("#2a3550", "#ffffff", dayness), "#ffc9a6", glow * 0.55), sky[1], 0.15 + overcast * 0.5);
+    // a new arrangement every day, spread across the sky so they don't pile up
+    const r = rng(11 + day), count = Math.round(2 + cloud * 8 + (rain ? 6 : 0));
+    const fill = rain ? mix(grey, "#000000", 0.12) : mix(mix(mix("#2a3550", "#ffffff", dayness), "#ffc9a6", glow * 0.55), sky[1], 0.15 + overcast * 0.75);
     for (let i = 0; i < count; i++) {
-      const x = r() * (W + 100) - 50, y = (rain ? 10 : 25) + r() * (HZ - (rain ? 130 : 100)), s = 0.6 + r() * 0.9 + (rain ? 0.6 : 0);
+      const x = ((i + r()) / count) * (W + 100) - 50, y = (rain ? 10 : 25) + r() * (HZ - (rain ? 130 : 100)), s = 0.6 + r() * 0.9 + (rain ? 0.6 : 0);
       const puffs = [[0, 0, 52, 13], [-34, 5, 32, 9], [36, 4, 36, 10], [6, -8, 30, 11]]
         .map(([dx, dy, rx, ry]) => `<ellipse cx="${n1(dx * s)}" cy="${n1(dy * s)}" rx="${n1(rx * s)}" ry="${n1(ry * s)}"/>`).join("");
       parts.push(`<g class="drift" style="animation-duration:${n1(50 + r() * 40)}s;animation-delay:-${n1(r() * 40)}s" opacity="${n1(0.55 + cloud * 0.35)}"><g transform="translate(${n1(x)} ${n1(y)})" fill="${fill}">${puffs}</g></g>`);
@@ -375,7 +391,8 @@ ${s.body}
 const t = now();
 const { weather, events } = await lookOutside(t);
 const m = moment(t, events);
-const moon = moonPhase(t.utc);
+const phase = moonPhase(t.utc);
+const moon = { ...phase, ...moonArc(t, events, phase.p) };
 const code = weather?.code;
 const mood = code == null ? m.mood : isStorm(code) ? "storm" : isRain(code) ? "rain" : isFog(code) ? "fog" : m.mood;
 const hhmm = new Date(t.local).toISOString().slice(11, 16);
@@ -384,7 +401,7 @@ const caption = {
   meta, mood: MOODS[mood], note: `looked outside at ${hhmm}`,
   alt: `A window over the sea in ${PLACE.name} at ${hhmm}${weather ? `, ${SKY_WORDS[code]}` : ""}. ${MOODS[mood]}`,
 };
-const s = scene({ m, weather, moon });
+const s = scene({ m, weather, moon, day: Math.floor(t.local / DAY) });
 
 await mkdir(OUT, { recursive: true });
 for (const theme of Object.keys(THEMES)) await writeFile(new URL(`window-${theme}.svg`, OUT), svg(theme, s, caption));
