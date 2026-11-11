@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Looks outside over Alexandria and redraws the almanac in the README: the
-// sun's path for the day, where the sun and the moon are on it now, and a
-// sentence about the weather. Runs every hour on GitHub Actions.
+// sun's path for the day, where the sun and the moon are on it now, and in
+// the margin a note about the weather and the day's figures. Runs every hour on GitHub Actions.
 // No dependencies, Node 20+.
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -122,18 +122,18 @@ function moonPhase(utc) {
 }
 
 function moonName({ lit, waxing }) {
-  if (lit < 0.02) return "new";
-  if (lit > 0.98) return "full";
-  if (Math.abs(lit - 0.5) < 0.04) return `at ${waxing ? "first" : "last"} quarter`;
-  return `a ${waxing ? "waxing" : "waning"} ${lit < 0.5 ? "crescent" : "gibbous"}, ${Math.round(lit * 100)}% lit`;
+  if (lit < 0.02) return "New";
+  if (lit > 0.98) return "Full";
+  if (Math.abs(lit - 0.5) < 0.04) return `${waxing ? "First" : "Last"} quarter`;
+  return `${waxing ? "Waxing" : "Waning"} ${lit < 0.5 ? "crescent" : "gibbous"}, ${Math.round(lit * 100)}%`;
 }
 
 // ------------------------------------------------------------------ words
 const clock = (local) => new Date(local).toISOString().slice(11, 16);
 const sameDay = (a, b) => Math.floor(a / DAY) === Math.floor(b / DAY);
 
-// What the picture says under itself, and to someone who cannot see it.
-function sentences(t, weather, events, phase) {
+// What the picture says beside itself, and to someone who cannot see it.
+function note(t, weather, events) {
   const prev = events.filter((e) => e.at <= t.local).at(-1);
   const next = events.find((e) => e.at > t.local);
   const out = [];
@@ -144,7 +144,6 @@ function sentences(t, weather, events, phase) {
   if (prev.kind === "rise") out.push(`The sun is up until ${clock(next.at)}.`);
   else if (sameDay(prev.at, t.local)) out.push(`The sun set at ${clock(prev.at)}.`);
   else out.push(`The sun rises at ${clock(next.at)}.`);
-  out.push(`The moon is ${moonName(phase)}.`);
   return out.join(" ");
 }
 
@@ -202,9 +201,12 @@ function wrap(text, styleName, maxWidth) {
 }
 
 // ------------------------------------------------------------------ drawing
-// As wide as the site's text column, so on a desktop the picture is shown at
-// its own size and the type in it is the size the site sets it at.
-const W = SITE.measure;
+// Laid out as the site lays out a page with sidenotes: the chart in the text
+// column, and a gutter away, a note column for the words and the figures.
+const W = SITE.measure.copy;
+const NOTE_X = W + SITE.measure.gutter;
+const FULL = NOTE_X + SITE.measure.note;
+const ROW = 26; // one row of the table of figures
 const DEGREE = 1; // px of height per degree of elevation
 // The highest the sun ever stands here, at noon on the June solstice. The
 // chart is drawn to hold it, so the curve's height through the year is real.
@@ -214,10 +216,9 @@ const LABEL_BASELINE = 13;
 const CHART_TOP = 62; // below the labels and the time over the now-line
 const HORIZON = CHART_TOP + ZENITH * DEGREE;
 const CHART_BOTTOM = HORIZON + ZENITH * DEGREE;
-const AXIS_BASELINE = CHART_BOTTOM + 30;
-const PROSE_TOP = AXIS_BASELINE + 26;
+const AXIS_BASELINE = CHART_BOTTOM + 34;
 
-function almanac(theme, { t, events, phase, text }) {
+function almanac(theme, { t, events, phase, text, figures }) {
   const c = SITE.palette[theme];
   const midnight = Math.floor(t.local / DAY) * DAY;
   const offset = t.local - t.utc;
@@ -225,10 +226,10 @@ function almanac(theme, { t, events, phase, text }) {
   const yAt = (degrees) => HORIZON - degrees * DEGREE;
   const parts = [];
 
-  // What is drawn where: place on the left, the date on the right.
+  // What is drawn where: place on the left, the date on the far right.
   const date = new Intl.DateTimeFormat("en-GB", { timeZone: "UTC", weekday: "long", day: "numeric", month: "long" }).format(new Date(t.local));
   parts.push(line(`${PLACE.name}, ${PLACE.country}`.toUpperCase(), "label", 0, LABEL_BASELINE, c.muted));
-  parts.push(line(date.replace(",", "").toUpperCase(), "label", W, LABEL_BASELINE, c.muted, "end"));
+  parts.push(line(date.replace(",", "").toUpperCase(), "label", FULL, LABEL_BASELINE, c.muted, "end"));
 
   // The sun's path over the whole day: drawn in full above the horizon, and
   // dotted below it, where it is real but cannot be seen.
@@ -269,7 +270,7 @@ function almanac(theme, { t, events, phase, text }) {
     const x = Math.min(W - 0.5, Math.round((h / 24) * W) + 0.5);
     const major = h % 6 === 0;
     parts.push(`<path d="M${x} ${CHART_BOTTOM + 8}v${major ? 7 : 3}" stroke="${c.muted}" stroke-width="1"/>`);
-    if (major) parts.push(line(String(h).padStart(2, "0"), "meta", h === 0 ? 0 : h === 24 ? W : x, AXIS_BASELINE + 4, c.muted, h === 0 ? "start" : h === 24 ? "end" : "middle"));
+    if (major) parts.push(line(String(h).padStart(2, "0"), "meta", h === 0 ? 0 : h === 24 ? W : x, AXIS_BASELINE, c.muted, h === 0 ? "start" : h === 24 ? "end" : "middle"));
   }
 
   // A hairline at the present hour, down to whichever of the two is lower.
@@ -294,21 +295,33 @@ function almanac(theme, { t, events, phase, text }) {
     ? `<circle cx="${n1(x)}" cy="${n1(yAt(sun))}" r="5" fill="${c.accent}"/>`
     : `<circle cx="${n1(x)}" cy="${n1(yAt(sun))}" r="4.25" fill="none" stroke="${c.accent}" stroke-width="1.5"/>`);
 
-  // The sentence, set like a lead paragraph and kept to the measure.
-  const prose = SITE.styles.prose, leading = prose.px * prose.lineHeight;
-  const lines = wrap(text, "prose", W);
-  const firstBaseline = PROSE_TOP + (leading - (prose.ascender - prose.descender) * prose.px / prose.upem) / 2 + prose.ascender * prose.px / prose.upem;
-  lines.forEach((l, i) => parts.push(line(l, "prose", 0, firstBaseline + i * leading, c.fg)));
+  // The margin. At the top, the note, set as the site sets a sidenote.
+  const small = SITE.styles.note, leading = small.px * small.lineHeight;
+  const lines = wrap(text, "note", SITE.measure.note);
+  const top = CHART_TOP - 32;
+  const firstBaseline = top + (leading - (small.ascender - small.descender) * small.px / small.upem) / 2 + small.ascender * small.px / small.upem;
+  lines.forEach((l, i) => parts.push(line(l, "note", NOTE_X, firstBaseline + i * leading, c.fg)));
 
-  const height = Math.ceil(PROSE_TOP + lines.length * leading);
-  return { height, body: parts.join("\n") };
+  // Under it, the day's figures as a table: a hairline over each row, the
+  // name on the left and the figure on the right. The last row sits on the
+  // same baseline as the hours, unless the note above needs the room.
+  const noteBottom = top + lines.length * leading;
+  const last = Math.max(AXIS_BASELINE, noteBottom + 16 + figures.length * ROW - 8);
+  figures.forEach(([name, value], i) => {
+    const baseline = last - (figures.length - 1 - i) * ROW;
+    parts.push(`<path d="M${NOTE_X} ${baseline - 17.5}H${FULL}" stroke="${c.rule}" stroke-width="1"/>`);
+    parts.push(line(name.toUpperCase(), "label", NOTE_X, baseline, c.muted));
+    parts.push(line(value, "meta", FULL, baseline, c.fg, "end"));
+  });
+
+  return { height: Math.ceil(last + 8), body: parts.join("\n") };
 }
 
 function svg(theme, scene) {
   defs.clear();
   const { height, body } = almanac(theme, scene);
   const glyphs = [...defs].map(([id, d]) => `<path id="${id}" d="${d}"/>`).join("");
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${height}" width="${W}" height="${height}" role="img" aria-labelledby="t">
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${FULL} ${height}" width="${FULL}" height="${height}" role="img" aria-labelledby="t">
 <!-- Drawn by scripts/window.mjs. The type is mohanadtarek.com's, traced by scripts/type.py. -->
 <title id="t">${esc(scene.alt)}</title>
 <defs>${glyphs}</defs>
@@ -321,12 +334,30 @@ ${body}
 const t = now();
 const { weather, events } = await lookOutside(t);
 const phase = moonPhase(t.utc);
-const text = sentences(t, weather, events, phase);
+const text = note(t, weather, events);
+
+// The figures for the table. Solar noon is when the sun crosses the meridian:
+// 12:00 by the sun, moved by the equation of time and by how far the place
+// sits from the middle of its time zone.
+const today = events.filter((e) => sameDay(e.at, t.local));
+const rise = today.find((e) => e.kind === "rise"), set = today.find((e) => e.kind === "set");
+const daylight = Math.round((set.at - rise.at) / MIN);
+const dayStart = Math.floor(t.local / DAY) * DAY;
+const { eq } = solar((2 * Math.PI / 365) * (dayOfYear(dayStart) - 0.5));
+const noonUtc = dayStart + (720 - eq - 4 * PLACE.lon) * MIN;
+const degrees = (v) => `${Math.round(v)}\u00b0`.replace("-", "\u2212");
+const figures = [
+  ["Daylight", `${Math.floor(daylight / 60)} h ${String(daylight % 60).padStart(2, "0")} min`],
+  ["Solar noon", `${clock(noonUtc + (t.local - t.utc))}, ${degrees(sunElevation(noonUtc))}`],
+  ["Sun height", degrees(sunElevation(t.utc))],
+  ["Moon", moonName(phase)],
+];
+
 const scene = {
-  t, events, phase, text,
-  alt: `The sun's path over ${PLACE.name} today, with the sun and the moon where they stand at ${clock(t.local)}. ${text}`,
+  t, events, phase, text, figures,
+  alt: `The sun's path over ${PLACE.name} today, with the sun and the moon where they stand at ${clock(t.local)}. ${text} ${figures.map(([name, value]) => `${name}: ${value}.`).join(" ")}`,
 };
 
 await mkdir(OUT, { recursive: true });
 for (const theme of Object.keys(SITE.palette)) await writeFile(new URL(`window-${theme}.svg`, OUT), svg(theme, scene));
-console.log(`${clock(t.local)} · sun ${n1(sunElevation(t.utc))}° · moon ${Math.round(phase.lit * 100)}% · ${text}`);
+console.log(`${clock(t.local)} · ${text} ${figures.map((f) => f.join(" ")).join(" · ")}`);

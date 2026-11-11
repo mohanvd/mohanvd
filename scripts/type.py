@@ -18,7 +18,7 @@ Run by hand, not on a schedule:
 
 It also writes type/atlas.json for scripts/window.mjs, which redraws a picture
 every hour and has to set type that changes: the glyph outlines, advances and
-kerning of the three styles it uses, with the palette and the measure.
+kerning of the styles it uses, with the palette and the widths of the page.
 
 The path defaults to a checkout sitting beside this one. Needs fontTools,
 brotli (the fonts are woff2) and uharfbuzz (kerning, and the variable axes).
@@ -54,12 +54,12 @@ PIECES = {
     "label-elsewhere": ("Elsewhere", LABEL),
 }
 
-# The styles the window sets its changing text in: a sentence as the site sets
-# a lead paragraph, and its figures and labels as the site sets metadata and
-# section labels. window.mjs has no dependencies and cannot shape text, so it
+# The styles the window sets its changing text in: a note as the site sets a
+# sidenote, and its figures and labels as the site sets metadata and section
+# labels. window.mjs has no dependencies and cannot shape text, so it
 # is handed every glyph it could need, already drawn.
 ATLAS = {
-    "prose": dict(font=SERIF, step="lead", weight=400),
+    "note": dict(font=SERIF, step="small", weight=400),
     "meta": dict(font=MONO, step="meta", weight=400),
     "label": dict(font=MONO, step="label", weight=600),
 }
@@ -86,7 +86,10 @@ def read_tokens():
         # Only the fixed steps are in rem; `code` is in em and is not used here.
         steps[name]["px"] = steps[name]["size"] * ROOT_FONT_SIZE
 
-    measure = float(re.search(r"copy: '([\d.]+)rem'", source)[1]) * ROOT_FONT_SIZE
+    # The widths a page with sidenotes is built from: the text column, the
+    # gutter beside it (the `md` space) and the note column.
+    rem = lambda name: float(re.search(rf"^\s+{name}: '([\d.]+)rem'", source, re.M)[1]) * ROOT_FONT_SIZE
+    measure = {"copy": rem("copy"), "gutter": rem("md"), "note": rem("note")}
 
     return palette, steps, measure
 
