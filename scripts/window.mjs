@@ -173,8 +173,13 @@ const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, 
 
 // ------------------------------------------------------------------ drawing
 const W = 900, SH = 330, H = 420, HZ = 232, BASE = HZ - 7;
-const SANS = "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif";
-const MONO = "ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace";
+// The site's fallback stacks. A picture shown through <img> cannot load a
+// webfont, so this is as close to Newsreader and JetBrains Mono as live text
+// gets; the README's name and labels are traced instead (scripts/type.py).
+const SERIF = "Georgia, 'Times New Roman', serif";
+const MONO = "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+// The site's largest corner: enough to keep a picture from looking die-cut.
+const RADIUS = 4;
 
 function scene({ m, weather, moon, day }) {
   const code = weather?.code ?? 0;
@@ -334,7 +339,7 @@ function scene({ m, weather, moon, day }) {
   if (storm) parts.push(`<rect class="flash" width="${W}" height="${SH}" fill="#e8ecff"/>`);
 
   const defs = `
-  <clipPath id="frame"><rect width="${W}" height="${SH}" rx="18"/></clipPath>
+  <clipPath id="frame"><rect width="${W}" height="${SH}" rx="${RADIUS}"/></clipPath>
   <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${sky[0]}"/><stop offset=".62" stop-color="${sky[1]}"/><stop offset="1" stop-color="${sky[2]}"/></linearGradient>
   <linearGradient id="sea" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${seaTop}"/><stop offset="1" stop-color="${seaBot}"/></linearGradient>
   <radialGradient id="glow"><stop offset="0" stop-color="#ffb27a" stop-opacity=".75"/><stop offset="1" stop-color="#ffb27a" stop-opacity="0"/></radialGradient>
@@ -344,12 +349,15 @@ function scene({ m, weather, moon, day }) {
   <linearGradient id="beam" x1="1" y1="0" x2="0" y2="0"><stop offset="0" stop-color="#fff1c8" stop-opacity=".55"/><stop offset="1" stop-color="#fff1c8" stop-opacity="0"/></linearGradient>
   <linearGradient id="fog" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${grey}" stop-opacity=".25"/><stop offset=".68" stop-color="${grey}" stop-opacity=".72"/><stop offset="1" stop-color="${grey}" stop-opacity=".4"/></linearGradient>`;
 
-  return { defs, body: `<g clip-path="url(#frame)">${parts.join("")}<rect x=".5" y=".5" width="${W - 1}" height="${SH - 1}" rx="18" fill="none" stroke="#ffffff" stroke-opacity=".07"/></g>` };
+  return { defs, body: `<g clip-path="url(#frame)">${parts.join("")}<rect x=".5" y=".5" width="${W - 1}" height="${SH - 1}" rx="${RADIUS}" fill="none" stroke="#ffffff" stroke-opacity=".07"/></g>` };
 }
 
+// The caption is set like mohanadtarek.com: these are its `fg` and `muted`
+// tokens (src/design/tokens.ts over there), copied because this file has no
+// dependencies, that repo included. Keep them in step by hand.
 const THEMES = {
-  dark: { text: "#e6edf3", muted: "#9198a1" },
-  light: { text: "#1f2328", muted: "#59636e" },
+  dark: { text: "#e4e0d8", muted: "#9c978d" },
+  light: { text: "#1c1b19", muted: "#6b6964" },
 };
 
 function svg(theme, s, caption) {
@@ -376,7 +384,7 @@ function svg(theme, s, caption) {
   @keyframes drop { to { transform: translate(-20px, 60px); } }
   @keyframes flash { 0%, 91%, 93.5%, 95%, 100% { opacity: 0; } 92% { opacity: .55; } 94.2% { opacity: .35; } }
   @media (prefers-reduced-motion: reduce) { * { animation: none !important; } .flash { opacity: 0; } }
-  .mood { font: 500 23px ${SANS}; fill: ${c.text}; letter-spacing: -.2px; }
+  .mood { font: 400 23px ${SERIF}; fill: ${c.text}; }
   .meta { font: 400 17px ${MONO}; fill: ${c.muted}; }
 </style>
 <defs>${s.defs}</defs>
