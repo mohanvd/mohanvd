@@ -16,10 +16,15 @@ Run by hand, not on a schedule:
 
     python scripts/type.py [path to a mohanadtarek.com checkout]
 
+It also writes type/atlas.json for scripts/window.mjs, which redraws a picture
+every hour and has to set type that changes: the glyph outlines, advances and
+kerning of the three styles it uses, with the palette and the measure.
+
 The path defaults to a checkout sitting beside this one. Needs fontTools,
 brotli (the fonts are woff2) and uharfbuzz (kerning, and the variable axes).
 """
 
+import json
 import re
 import sys
 from io import BytesIO
@@ -49,6 +54,18 @@ PIECES = {
     "label-elsewhere": ("Elsewhere", LABEL),
 }
 
+# The styles the window sets its changing text in: a sentence as the site sets
+# a lead paragraph, and its figures and labels as the site sets metadata and
+# section labels. window.mjs has no dependencies and cannot shape text, so it
+# is handed every glyph it could need, already drawn.
+ATLAS = {
+    "prose": dict(font=SERIF, step="lead", weight=400),
+    "meta": dict(font=MONO, step="meta", weight=400),
+    "label": dict(font=MONO, step="label", weight=600),
+}
+CHARSET = [chr(code) for code in range(32, 127)] + list("°·’–−")
+LIGATURES = ["ff", "fi", "fl", "ffi", "ffl"]
+
 ROOT_FONT_SIZE = 16  # px in a rem, at the browser's default text size
 
 
@@ -69,7 +86,9 @@ def read_tokens():
         # Only the fixed steps are in rem; `code` is in em and is not used here.
         steps[name]["px"] = steps[name]["size"] * ROOT_FONT_SIZE
 
-    return palette, steps
+    measure = float(re.search(r"copy: '([\d.]+)rem'", source)[1]) * ROOT_FONT_SIZE
+
+    return palette, steps, measure
 
 
 def load(font_file, variations):
@@ -134,9 +153,64 @@ def trace(text, font, step, weight, color, upper):
     return svg, width, height
 
 
+def atlas(font, step, weight):
+    """Every glyph of one style, for a program that lays out its own lines."""
+    variations = {"wght": weight}
+    if "opsz" in step:
+        variations["opsz"] = step["opsz"]
+    hb_font, upem, ascender, descender = load(font, variations)
+
+    def shape(text):
+        buffer = hb.Buffer()
+        buffer.add_str(text)
+        buffer.guess_segment_properties()
+        hb.shape(hb_font, buffer)
+        return buffer.glyph_infos, buffer.glyph_positions
+
+    # A ligature is kept only if the font has it: the text then asks for "fi"
+    # by name and gets one glyph, as a browser would give it.
+    glyphs = {}
+    for text in CHARSET + LIGATURES:
+        infos, positions = shape(text)
+        if len(infos) != 1 or infos[0].codepoint == 0:
+            continue
+        pen = SVGPathPen(None, ntos=lambda value: str(round(value)))
+        hb_font.draw_glyph_with_pen(infos[0].codepoint, pen)
+        glyphs[text] = [positions[0].x_advance, pen.getCommands()]
+
+    # Kerning, read back off the shaper: how far a pair moves the first
+    # glyph's advance from what it is alone.
+    kerning = {}
+    for a in CHARSET:
+        for b in CHARSET:
+            if a not in glyphs or b not in glyphs:
+                continue
+            infos, positions = shape(a + b)
+            if len(infos) == 2 and (shift := positions[0].x_advance - glyphs[a][0]):
+                kerning[a + b] = shift
+
+    return {
+        "px": step["px"],
+        "lineHeight": step["lineHeight"],
+        "letterSpacing": step["letterSpacing"],
+        "upem": upem,
+        "ascender": ascender,
+        "descender": descender,
+        "glyphs": glyphs,
+        "kerning": kerning,
+    }
+
+
 def main():
-    palette, steps = read_tokens()
+    palette, steps, measure = read_tokens()
     OUT.mkdir(exist_ok=True)
+
+    styles = {name: atlas(s["font"], steps[s["step"]], s["weight"]) for name, s in ATLAS.items()}
+    (OUT / "atlas.json").write_text(
+        json.dumps({"palette": palette, "measure": measure, "styles": styles}, ensure_ascii=False, separators=(",", ":")),
+        encoding="utf-8",
+        newline="\n",
+    )
 
     for name, (text, style) in PIECES.items():
         svg, width, height = trace(
