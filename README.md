@@ -7,7 +7,7 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/mohanvd/mohanvd/window/window-dark.svg">
-  <img alt="A window looking out over the sea in Alexandria, redrawn every hour from the current weather, the sun's position and the moon's phase." src="https://raw.githubusercontent.com/mohanvd/mohanvd/window/window-light.svg" width="100%">
+  <img alt="The sun's path over Alexandria today, with the sun and the moon where they stand now, the times of sunrise and sunset, and a sentence about the weather. Redrawn every hour." src="https://raw.githubusercontent.com/mohanvd/mohanvd/window/window-light.svg" width="544">
 </picture>
 
 <h2>

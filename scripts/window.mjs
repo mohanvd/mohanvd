@@ -1,29 +1,24 @@
 #!/usr/bin/env node
-// Looks outside over Alexandria and redraws the window in the README.
-// Runs every hour on GitHub Actions. No dependencies, Node 20+.
+// Looks outside over Alexandria and redraws the almanac in the README: the
+// sun's path for the day, where the sun and the moon are on it now, and a
+// sentence about the weather. Runs every hour on GitHub Actions.
+// No dependencies, Node 20+.
 
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 
-const PLACE = { name: "Alexandria", lat: 31.2001, lon: 29.9187, tz: "Africa/Cairo" };
-
-// What the caption says at each time of day. Make these yours.
-const MOODS = {
-  lateNight: "Still up. Probably rewriting something that already worked.",
-  dawn: "First light over the Mediterranean.",
-  morning: "Morning in Alexandria.",
-  afternoon: "Afternoon. The sea is doing its thing.",
-  golden: "Golden hour on the Corniche.",
-  dusk: "The sun just slipped into the sea.",
-  evening: "Evening by the sea. Good time to build something.",
-  rain: "It's raining in Alexandria. Doesn't happen often.",
-  storm: "Thunderstorm over the Mediterranean.",
-  fog: "Fog over the harbor. Can barely see the lighthouse.",
-};
+const PLACE = { name: "Alexandria", country: "Egypt", lat: 31.2001, lon: 29.9187, tz: "Africa/Cairo" };
 
 const OUT = new URL(process.env.WINDOW_OUT ? `file://${process.env.WINDOW_OUT}/` : "../window/", import.meta.url);
 
+// The picture is set in mohanadtarek.com's type and colours. An SVG shown
+// through <img> cannot load a webfont, and this file has no dependencies to
+// shape text with, so scripts/type.py hands it both ready-made: the site's
+// palette and measure, and every glyph of the three styles used here.
+const SITE = JSON.parse(await readFile(new URL("../type/atlas.json", import.meta.url), "utf8"));
+
 // ------------------------------------------------------------------ time
 const MIN = 60_000, HOUR = 60 * MIN, DAY = 24 * HOUR;
+const RAD = Math.PI / 180;
 
 function tzOffset(utcMs, tz = PLACE.tz) {
   const p = Object.fromEntries(
@@ -45,19 +40,36 @@ function now() {
   return { local: utc + tzOffset(utc), utc };
 }
 
-// NOAA sunrise equation, used when the weather API can't be reached.
-function solarEvents(dayLocal) {
-  const d = new Date(dayLocal);
-  const n = Math.floor((Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - Date.UTC(d.getUTCFullYear(), 0, 1)) / DAY) + 1;
-  const g = (2 * Math.PI / 365) * (n - 1);
+// NOAA's solar approximations: the equation of time in minutes and the sun's
+// declination in radians, for a fractional year g.
+function solar(g) {
   const eq = 229.18 * (0.000075 + 0.001868 * Math.cos(g) - 0.032077 * Math.sin(g) - 0.014615 * Math.cos(2 * g) - 0.040849 * Math.sin(2 * g));
   const decl = 0.006918 - 0.399912 * Math.cos(g) + 0.070257 * Math.sin(g) - 0.006758 * Math.cos(2 * g)
     + 0.000907 * Math.sin(2 * g) - 0.002697 * Math.cos(3 * g) + 0.00148 * Math.sin(3 * g);
-  const lat = PLACE.lat * Math.PI / 180;
-  const ha = Math.acos(Math.cos(90.833 * Math.PI / 180) / (Math.cos(lat) * Math.cos(decl)) - Math.tan(lat) * Math.tan(decl)) * 180 / Math.PI;
+  return { eq, decl };
+}
+
+const dayOfYear = (ms) => Math.floor((ms - Date.UTC(new Date(ms).getUTCFullYear(), 0, 1)) / DAY) + 1;
+
+// Sunrise and sunset, used when the weather API can't be reached.
+function solarEvents(dayLocal) {
+  const d = new Date(dayLocal);
+  const { eq, decl } = solar((2 * Math.PI / 365) * (dayOfYear(dayLocal) - 1));
+  const lat = PLACE.lat * RAD;
+  const ha = Math.acos(Math.cos(90.833 * RAD) / (Math.cos(lat) * Math.cos(decl)) - Math.tan(lat) * Math.tan(decl)) / RAD;
   const midnightUtc = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
   const toLocal = (mins) => { const u = midnightUtc + mins * MIN; return u + tzOffset(u); };
   return { rise: toLocal(720 - 4 * (PLACE.lon + ha) - eq), set: toLocal(720 - 4 * (PLACE.lon - ha) - eq) };
+}
+
+// The sun's height above the horizon in degrees, at a moment in real UTC.
+function sunElevation(utc) {
+  const hours = (((utc % DAY) + DAY) % DAY) / HOUR;
+  const { eq, decl } = solar((2 * Math.PI / 365) * (dayOfYear(utc) - 1 + (hours - 12) / 24));
+  const solarMinutes = hours * 60 + eq + 4 * PLACE.lon;
+  const hourAngle = (solarMinutes / 4 - 180) * RAD;
+  const lat = PLACE.lat * RAD;
+  return Math.asin(Math.sin(lat) * Math.sin(decl) + Math.cos(lat) * Math.cos(decl) * Math.cos(hourAngle)) / RAD;
 }
 
 // ------------------------------------------------------------------ weather
@@ -98,27 +110,10 @@ const SKY_WORDS = {
   61: "light rain", 63: "rain", 65: "heavy rain", 66: "freezing rain", 67: "freezing rain",
   71: "snow", 73: "snow", 75: "heavy snow", 77: "snow grains",
   80: "showers", 81: "showers", 82: "heavy showers", 85: "snow showers", 86: "snow showers",
-  95: "thunderstorm", 96: "thunderstorm, hail", 99: "thunderstorm, hail",
+  95: "thunderstorm", 96: "thunderstorm with hail", 99: "thunderstorm with hail",
 };
-const isRain = (c) => (c >= 51 && c <= 67) || (c >= 80 && c <= 82) || c >= 95;
-const isStorm = (c) => c >= 95;
-const isFog = (c) => c === 45 || c === 48;
 
-// ------------------------------------------------------------------ the moment
-function moment(t, events) {
-  const prev = events.filter((e) => e.at <= t.local).at(-1);
-  const next = events.find((e) => e.at > t.local);
-  const day = prev.kind === "rise";
-  const f = (t.local - prev.at) / (next.at - prev.at);
-  const elev = (day ? 1 : -1) * Math.sin(Math.PI * f); // -1 midnight .. 0 horizon .. 1 noon
-  const since = (t.local - prev.at) / MIN, until = (next.at - t.local) / MIN;
-  const hour = new Date(t.local).getUTCHours();
-  let mood;
-  if (day) mood = until <= 45 ? "golden" : since <= 40 ? "dawn" : hour < 12 ? "morning" : "afternoon";
-  else mood = since <= 45 ? "dusk" : until <= 50 ? "dawn" : hour < 12 ? "lateNight" : "evening";
-  return { day, f, elev, mood };
-}
-
+// ------------------------------------------------------------------ the moon
 function moonPhase(utc) {
   const synodic = 29.530588853;
   const age = (((utc - Date.UTC(2000, 0, 6, 18, 14)) / DAY) % synodic + synodic) % synodic;
@@ -126,291 +121,212 @@ function moonPhase(utc) {
   return { p, lit: (1 - Math.cos(2 * Math.PI * p)) / 2, waxing: p < 0.5 };
 }
 
-// The moon follows the sun's path but runs late by its age: a new moon is up
-// all day, a full moon all night, a first quarter from noon to midnight.
-function moonArc(t, events, p) {
-  let at = t.local - p * DAY;
-  if (at < events[0].at) at += DAY;
-  const prev = events.filter((e) => e.at <= at).at(-1);
-  const next = events.find((e) => e.at > at);
-  return { up: prev.kind === "rise", f: (at - prev.at) / (next.at - prev.at) };
+function moonName({ lit, waxing }) {
+  if (lit < 0.02) return "new";
+  if (lit > 0.98) return "full";
+  if (Math.abs(lit - 0.5) < 0.04) return `at ${waxing ? "first" : "last"} quarter`;
+  return `a ${waxing ? "waxing" : "waning"} ${lit < 0.5 ? "crescent" : "gibbous"}, ${Math.round(lit * 100)}% lit`;
 }
 
-// ------------------------------------------------------------------ color
-const hex = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
-const toHex = (c) => "#" + c.map((v) => Math.round(Math.max(0, Math.min(255, v))).toString(16).padStart(2, "0")).join("");
-const mix = (a, b, t) => toHex(hex(a).map((v, i) => v + (hex(b)[i] - v) * t));
-const clamp = (v, a = 0, b = 1) => Math.max(a, Math.min(b, v));
+// ------------------------------------------------------------------ words
+const clock = (local) => new Date(local).toISOString().slice(11, 16);
+const sameDay = (a, b) => Math.floor(a / DAY) === Math.floor(b / DAY);
 
-const SKY = [
-  [-1.0, "#03060f", "#070d1f", "#0d1730"],
-  [-0.35, "#050a18", "#0b1530", "#16224a"],
-  [-0.12, "#0d1838", "#25285a", "#4a3266"],
-  [-0.03, "#1c2b5c", "#6a4a7e", "#e07a6a"],
-  [0.0, "#2f4a86", "#b0748a", "#f79a5e"],
-  [0.08, "#43699f", "#c79a8e", "#f8b977"],
-  [0.18, "#4f86c9", "#a9c0d8", "#f1d5aa"],
-  [0.35, "#3f86d8", "#86bce9", "#cfe6f5"],
-  [1.0, "#2a7de0", "#6fb2ee", "#bfe0f7"],
-];
-function skyAt(e) {
-  const i = Math.max(0, SKY.findIndex((k) => k[0] >= e) - 1);
-  const [a, b] = [SKY[i], SKY[Math.min(i + 1, SKY.length - 1)]];
-  const t = b[0] === a[0] ? 0 : clamp((e - a[0]) / (b[0] - a[0]));
-  return [1, 2, 3].map((j) => mix(a[j], b[j], t));
+// What the picture says under itself, and to someone who cannot see it.
+function sentences(t, weather, events, phase) {
+  const prev = events.filter((e) => e.at <= t.local).at(-1);
+  const next = events.find((e) => e.at > t.local);
+  const out = [];
+  if (weather) {
+    const sky = SKY_WORDS[weather.code] ?? "weather unknown";
+    out.push(`${sky[0].toUpperCase()}${sky.slice(1)}, ${Math.round(weather.temp).toString().replace("-", "−")}°C.`);
+  }
+  if (prev.kind === "rise") out.push(`The sun is up until ${clock(next.at)}.`);
+  else if (sameDay(prev.at, t.local)) out.push(`The sun set at ${clock(prev.at)}.`);
+  else out.push(`The sun rises at ${clock(next.at)}.`);
+  out.push(`The moon is ${moonName(phase)}.`);
+  return out.join(" ");
 }
 
-function rng(seed) {
-  return () => {
-    seed |= 0; seed = (seed + 0x6d2b79f5) | 0;
-    let r = Math.imul(seed ^ (seed >>> 15), 1 | seed);
-    r = (r + Math.imul(r ^ (r >>> 7), 61 | r)) ^ r;
-    return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
-  };
-}
+// ------------------------------------------------------------------ type
 const n1 = (v) => Math.round(v * 10) / 10;
 const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
-// ------------------------------------------------------------------ drawing
-const W = 900, SH = 330, H = 420, HZ = 232, BASE = HZ - 7;
-// The site's fallback stacks. A picture shown through <img> cannot load a
-// webfont, so this is as close to Newsreader and JetBrains Mono as live text
-// gets; the README's name and labels are traced instead (scripts/type.py).
-const SERIF = "Georgia, 'Times New Roman', serif";
-const MONO = "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
-// The site's largest corner: enough to keep a picture from looking die-cut.
-const RADIUS = 4;
+// Every glyph the picture uses is defined once and placed by reference.
+const defs = new Map();
 
-function scene({ m, weather, moon, day }) {
-  const code = weather?.code ?? 0;
-  const rain = isRain(code), storm = isStorm(code), fog = isFog(code);
-  const cloud = clamp((weather?.cloud ?? 10) / 100);
-  const [top, mid, bottom] = skyAt(m.elev);
-  const dayness = clamp((m.elev + 0.05) / 0.3);
-  const glow = clamp(1 - Math.abs(m.elev) / 0.22) * (1 - cloud * 0.7) * (rain || fog ? 0.2 : 1);
-
-  const grey = rain ? mix("#12161d", "#5d6875", dayness) : fog ? mix("#2a2f38", "#c1c8cf", dayness) : mix("#1a1f2a", "#9aa6b4", dayness);
-  const overcast = clamp(cloud * 0.2 + clamp((cloud - 0.5) / 0.5) * 0.65 + (rain ? 0.35 : 0) + (storm ? 0.15 : 0) + (fog ? 0.55 : 0));
-  const sky = [top, mid, bottom].map((c) => mix(c, grey, overcast));
-  const hidden = rain || cloud > 0.9;
-  // Low sun: the water takes the cooler sky above the horizon band, or orange on navy turns to mud.
-  const low = clamp(1 - Math.abs(m.elev) / 0.3);
-  const water = mix(sky[2], sky[1], low * clamp(m.elev / 0.08));
-  const deep = mix(mix("#04101f", "#0f4c74", dayness), mix(grey, "#000000", 0.5), overcast * 0.6);
-  let seaTop = mix(water, deep, 0.62);
-  const warm = low * (1 - cloud * 0.7) * (rain || fog ? 0 : 1);
-  seaTop = mix(seaTop, mix(water, "#2b3354", 0.45), warm * 0.7);
-  const seaBot = mix(seaTop, "#020610", 0.55);
-  const stone = mix(seaTop, "#000000", 0.55 - dayness * 0.15);
-  const far = mix(stone, sky[2], 0.32);
-  const lights = m.elev < 0.02 || fog;
-  const parts = [];
-
-  // sky + horizon glow
-  const sunX = W - 80 - m.f * (W - 160);
-  const glowX = m.day ? sunX : m.f < 0.5 ? 80 : W - 80;
-  parts.push(`<rect width="${W}" height="${SH}" fill="url(#sky)"/>`);
-  if (glow > 0.02) parts.push(`<ellipse cx="${n1(glowX)}" cy="${HZ}" rx="420" ry="150" fill="url(#glow)" opacity="${n1(glow)}"/>`);
-
-  // stars
-  const starVis = clamp((-m.elev - 0.06) / 0.2) * (1 - cloud * 0.9);
-  if (starVis > 0.02) {
-    const r = rng(7);
-    for (let i = 0; i < 80; i++) {
-      const x = r() * W, y = r() * (HZ - 30), s = 0.5 + r() * 1.1, o = (0.35 + r() * 0.65) * starVis;
-      const tw = r() < 0.3 ? ` class="tw" style="animation-duration:${n1(3 + r() * 4)}s;animation-delay:-${n1(r() * 6)}s"` : "";
-      parts.push(`<circle cx="${n1(x)}" cy="${n1(y)}" r="${n1(s)}" fill="#ffffff" opacity="${n1(o)}"${tw}/>`);
-    }
-  }
-
-  // sun or moon
-  let body = null, sunCol = "#fff6dc";
-  if (m.day) {
-    const y = HZ - Math.sin(Math.PI * m.f) * 190;
-    const col = mix("#ffb067", "#fff6dc", clamp(m.elev / 0.3));
-    const o = n1(fog ? 0.35 : 1 - cloud * 0.5);
-    sunCol = col;
-    if (!hidden) parts.push(`<circle cx="${n1(sunX)}" cy="${n1(y)}" r="70" fill="url(#sunglow)" opacity="${o}"/>`,
-      `<circle cx="${n1(sunX)}" cy="${n1(y)}" r="19" fill="${col}" opacity="${hidden ? 0 : o}"/>`);
-    body = hidden ? null : { x: sunX, col, strength: clamp(1 - cloud * 0.8) * (fog ? 0.25 : 1) };
-  } else if (moon.up) {
-    const x = W - 110 - moon.f * (W - 220), y = HZ - Math.sin(Math.PI * moon.f) * 175, r = 14;
-    const o = n1(1 - cloud * 0.7);
-    const rx = n1(r * Math.abs(1 - 2 * moon.lit));
-    const right = !moon.waxing; // the bright limb faces the sun, which is west (left) of a waxing moon
-    const term = (moon.lit < 0.5) !== right ? 1 : 0;
-    const path = `M${n1(x)} ${n1(y - r)}A${r} ${r} 0 0 ${right ? 1 : 0} ${n1(x)} ${n1(y + r)}A${rx} ${r} 0 0 ${term} ${n1(x)} ${n1(y - r)}Z`;
-    if (!hidden && !fog) parts.push(`<circle cx="${n1(x)}" cy="${n1(y)}" r="60" fill="url(#moonglow)" opacity="${n1(o * moon.lit * 0.9)}"/>`,
-      `<circle cx="${n1(x)}" cy="${n1(y)}" r="${r}" fill="#c9cfdd" opacity="${hidden || fog ? 0 : n1(o * 0.1)}"/>`,
-      `<path d="${path}" fill="#f1ecdc" opacity="${hidden || fog ? 0 : o}"/>`);
-    body = hidden || fog ? null : { x, col: "#f1ecdc", strength: moon.lit * clamp(1 - cloud * 0.8) * 0.75 };
-  }
-
-  // clouds
-  if (cloud > 0.1) {
-    // a new arrangement every day, spread across the sky so they don't pile up
-    const r = rng(11 + day), count = Math.round(2 + cloud * 8 + (rain ? 6 : 0));
-    const fill = rain ? mix(grey, "#000000", 0.12) : mix(mix(mix("#2a3550", "#ffffff", dayness), "#ffc9a6", glow * 0.55), sky[1], 0.15 + overcast * 0.75);
-    for (let i = 0; i < count; i++) {
-      const x = ((i + r()) / count) * (W + 100) - 50, y = (rain ? 10 : 25) + r() * (HZ - (rain ? 130 : 100)), s = 0.6 + r() * 0.9 + (rain ? 0.6 : 0);
-      const puffs = [[0, 0, 52, 13], [-34, 5, 32, 9], [36, 4, 36, 10], [6, -8, 30, 11]]
-        .map(([dx, dy, rx, ry]) => `<ellipse cx="${n1(dx * s)}" cy="${n1(dy * s)}" rx="${n1(rx * s)}" ry="${n1(ry * s)}"/>`).join("");
-      parts.push(`<g class="drift" style="animation-duration:${n1(50 + r() * 40)}s;animation-delay:-${n1(r() * 40)}s" opacity="${n1(0.55 + cloud * 0.35)}"><g transform="translate(${n1(x)} ${n1(y)})" fill="${fill}">${puffs}</g></g>`);
-    }
-    if (cloud > 0.8 || rain || fog) parts.push(`<rect width="${W}" height="${HZ}" fill="${grey}" opacity="${n1(0.18 + cloud * 0.15 + (rain ? 0.15 : 0))}"/>`);
-  }
-
-  // birds on calm days
-  if (m.day && m.elev > 0.1 && cloud < 0.6 && !rain) {
-    const r = rng(23);
-    for (let i = 0; i < 3; i++) {
-      const x = 180 + r() * 380, y = 70 + r() * 70, s = 0.8 + r() * 0.5;
-      parts.push(`<g class="bird" style="animation-delay:-${n1(r() * 30)}s"><path transform="translate(${n1(x)} ${n1(y)}) scale(${n1(s)})" d="M0 0q4-4 8 0q4-4 8 0" fill="none" stroke="${stone}" stroke-width="1.4" stroke-linecap="round"/></g>`);
-    }
-  }
-
-  // sea
-  parts.push(`<rect y="${HZ}" width="${W}" height="${SH - HZ}" fill="url(#sea)"/>`);
-  if (body && body.strength > 0.05) {
-    const r = rng(31);
-    for (let i = 0; i < 14; i++) {
-      const y = HZ + 5 + i * 6.6, w = (10 + i * 4.5) * (0.6 + r() * 0.8);
-      parts.push(`<rect class="glint" style="animation-delay:-${n1(r() * 3)}s" x="${n1(body.x - w / 2 + (r() - 0.5) * 8)}" y="${n1(y)}" width="${n1(w)}" height="1.6" rx=".8" fill="${body.col}" opacity="${n1((0.6 - i * 0.03) * body.strength)}"/>`);
-    }
-  }
-  {
-    const r = rng(41), wave = mix(seaTop, "#ffffff", 0.22);
-    for (let i = 0; i < 10; i++) {
-      const y = HZ + 4 + (SH - HZ - 8) * Math.pow((i + 1) / 10, 1.7);
-      const a = 20 + r() * 70, b = 30 + r() * 110;
-      parts.push(`<line class="wave" style="--d:${-n1((a + b) * 2)}px;animation-duration:${n1(16 + r() * 22)}s" x1="0" x2="${W}" y1="${n1(y)}" y2="${n1(y)}" stroke="${wave}" stroke-width="${n1(0.7 + i * 0.09)}" stroke-dasharray="${n1(a)} ${n1(b)}" opacity="${n1(0.12 + i * 0.025)}"/>`);
-    }
-  }
-
-  // the far shore: the Corniche, low and hazy
-  {
-    const r = rng(5);
-    let x = 0;
-    while (x < 470) {
-      const w = 10 + r() * 24, h = r() < 0.15 ? 14 + r() * 12 : 4 + r() * 10;
-      parts.push(`<rect x="${n1(x)}" y="${n1(HZ - h)}" width="${n1(w + 0.5)}" height="${n1(h)}" fill="${far}"/>`);
-      if (lights) for (let k = 0; k < 3; k++) if (r() < 0.35) parts.push(`<rect x="${n1(x + 2 + r() * (w - 4))}" y="${n1(HZ - 2 - r() * (h - 3))}" width="1.4" height="1.4" fill="#ffd58a" opacity="${n1(0.5 + r() * 0.4)}"/>`);
-      x += w;
-    }
-    if (lights) for (let lx = 3; lx < 470; lx += 9) parts.push(`<circle cx="${lx}" cy="${HZ - 0.8}" r=".8" fill="#ffcf7a" opacity=".55"/>`);
-  }
-
-  // the citadel and the lighthouse
-  const S = [];
-  S.push(`<path d="M575 ${HZ}L605 ${BASE + 1}L${W} ${BASE - 1}V${HZ}Z"/>`, `<rect x="500" y="${BASE - 1}" width="110" height="${HZ - BASE + 1}"/>`);
-  S.push(`<rect x="640" y="${BASE - 30}" width="220" height="31"/>`);
-  for (let x = 640; x < 858; x += 10) S.push(`<rect x="${x}" y="${BASE - 35}" width="5" height="6"/>`);
-  for (const x of [632, 850]) {
-    S.push(`<rect x="${x}" y="${BASE - 40}" width="18" height="41"/>`);
-    for (let k = 0; k < 3; k++) S.push(`<rect x="${x + k * 7}" y="${BASE - 45}" width="4" height="6"/>`);
-  }
-  S.push(`<rect x="718" y="${BASE - 66}" width="64" height="37"/>`);
-  for (let x = 718; x < 780; x += 9) S.push(`<rect x="${x}" y="${BASE - 71}" width="5" height="6"/>`);
-  for (const x of [713, 777]) S.push(`<rect x="${x}" y="${BASE - 74}" width="10" height="45"/>`);
-  S.push(`<rect x="746" y="${BASE - 96}" width="8" height="31"/>`, `<rect x="742" y="${BASE - 85}" width="16" height="3"/>`,
-    `<circle cx="750" cy="${BASE - 97}" r="4.5"/>`, `<rect x="749.4" y="${BASE - 106}" width="1.2" height="6"/>`);
-  S.push(`<path d="M533 ${BASE}L547 ${BASE}L544 ${BASE - 50}L536 ${BASE - 50}Z"/>`, `<rect x="532" y="${BASE - 53}" width="16" height="3"/>`,
-    `<path d="M533 ${BASE - 62}L547 ${BASE - 62}L540 ${BASE - 69}Z"/>`);
-  if (lights) {
-    const ox = 540, oy = BASE - 57.5;
-    parts.push(`<g class="beam" style="transform-origin:${ox}px ${oy}px"><path d="M${ox} ${oy}L${ox - 420} ${oy - 34}L${ox - 420} ${oy + 22}Z" fill="url(#beam)" opacity="${fog ? 0.9 : 0.6}"/></g>`);
-  }
-  parts.push(`<g fill="${stone}">${S.join("")}</g>`);
-  parts.push(`<rect x="535" y="${BASE - 62}" width="10" height="9" fill="${lights ? "#ffe3a3" : mix(stone, sky[2], 0.3)}"/>`);
-  if (lights) {
-    parts.push(`<circle class="lamp" cx="540" cy="${BASE - 57.5}" r="16" fill="url(#lampglow)"/>`);
-    for (const [x, y] of [[730, BASE - 52], [764, BASE - 52], [660, BASE - 18]]) parts.push(`<rect x="${x}" y="${y}" width="3" height="5" fill="#ffcf7a" opacity=".8"/>`);
-  }
-
-  // weather on top
-  if (fog) parts.push(`<rect width="${W}" height="${SH}" fill="url(#fog)"/>`);
-  if (rain) {
-    const r = rng(53), drops = storm ? 140 : 90, col = mix("#ffffff", sky[1], 0.4);
-    for (let i = 0; i < drops; i++) {
-      const x = r() * (W + 80), y = r() * SH - 40;
-      parts.push(`<line class="drop" style="animation-duration:${n1(0.6 + r() * 0.5)}s;animation-delay:-${n1(r())}s" x1="${n1(x)}" y1="${n1(y)}" x2="${n1(x - 5)}" y2="${n1(y + 15)}" stroke="${col}" stroke-width="1" opacity="${n1(0.25 + r() * 0.3)}"/>`);
-    }
-  }
-  if (storm) parts.push(`<rect class="flash" width="${W}" height="${SH}" fill="#e8ecff"/>`);
-
-  const defs = `
-  <clipPath id="frame"><rect width="${W}" height="${SH}" rx="${RADIUS}"/></clipPath>
-  <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${sky[0]}"/><stop offset=".62" stop-color="${sky[1]}"/><stop offset="1" stop-color="${sky[2]}"/></linearGradient>
-  <linearGradient id="sea" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${seaTop}"/><stop offset="1" stop-color="${seaBot}"/></linearGradient>
-  <radialGradient id="glow"><stop offset="0" stop-color="#ffb27a" stop-opacity=".75"/><stop offset="1" stop-color="#ffb27a" stop-opacity="0"/></radialGradient>
-  <radialGradient id="sunglow"><stop offset="0" stop-color="${sunCol}" stop-opacity=".55"/><stop offset="1" stop-color="${sunCol}" stop-opacity="0"/></radialGradient>
-  <radialGradient id="moonglow"><stop offset="0" stop-color="#e9e4cf" stop-opacity=".35"/><stop offset="1" stop-color="#e9e4cf" stop-opacity="0"/></radialGradient>
-  <radialGradient id="lampglow"><stop offset="0" stop-color="#ffe3a3" stop-opacity=".7"/><stop offset="1" stop-color="#ffe3a3" stop-opacity="0"/></radialGradient>
-  <linearGradient id="beam" x1="1" y1="0" x2="0" y2="0"><stop offset="0" stop-color="#fff1c8" stop-opacity=".55"/><stop offset="1" stop-color="#fff1c8" stop-opacity="0"/></linearGradient>
-  <linearGradient id="fog" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${grey}" stop-opacity=".25"/><stop offset=".68" stop-color="${grey}" stop-opacity=".72"/><stop offset="1" stop-color="${grey}" stop-opacity=".4"/></linearGradient>`;
-
-  return { defs, body: `<g clip-path="url(#frame)">${parts.join("")}<rect x=".5" y=".5" width="${W - 1}" height="${SH - 1}" rx="${RADIUS}" fill="none" stroke="#ffffff" stroke-opacity=".07"/></g>` };
+function glyphId(styleName, key) {
+  const id = styleName[0] + [...key].map((c) => c.codePointAt(0).toString(36)).join("-");
+  if (!defs.has(id)) defs.set(id, SITE.styles[styleName].glyphs[key][1]);
+  return id;
 }
 
-// The caption is set like mohanadtarek.com: these are its `fg` and `muted`
-// tokens (src/design/tokens.ts over there), copied because this file has no
-// dependencies, that repo included. Keep them in step by hand.
-const THEMES = {
-  dark: { text: "#e4e0d8", muted: "#9c978d" },
-  light: { text: "#1c1b19", muted: "#6b6964" },
-};
+// One line of text as glyphs and positions, in font units: ligatures where the
+// font has them, kerning between neighbours, then the style's letter-spacing.
+function shape(text, styleName) {
+  const style = SITE.styles[styleName];
+  const tracking = style.letterSpacing * style.upem;
+  const run = [];
+  let x = 0;
+  for (let i = 0; i < text.length;) {
+    const key = [3, 2, 1].map((n) => text.slice(i, i + n)).find((k) => k.length && style.glyphs[k]) ?? "?";
+    const next = text[i + key.length];
+    run.push({ key, x });
+    x += style.glyphs[key][0] + tracking + (key.length === 1 && next ? style.kerning[key + next] ?? 0 : 0);
+    i += Math.max(1, key.length);
+  }
+  return { run, width: (x - (run.length ? tracking : 0)) * style.px / style.upem };
+}
 
-function svg(theme, s, caption) {
-  const c = THEMES[theme];
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-labelledby="t">
-<title id="t">${esc(caption.alt)}</title>
-<style>
-  .tw { animation: tw 4s ease-in-out infinite alternate; }
-  .drift { animation: drift 60s ease-in-out infinite alternate; }
-  .bird { animation: bird 40s ease-in-out infinite alternate; }
-  .glint { animation: glint 2.6s ease-in-out infinite alternate; }
-  .wave { animation: wave 24s linear infinite; }
-  .beam { animation: beam 7s ease-in-out infinite alternate; }
-  .lamp { animation: lamp 3.5s ease-in-out infinite alternate; }
-  .drop { animation: drop .8s linear infinite; }
-  .flash { opacity: 0; animation: flash 9s linear infinite; }
-  @keyframes tw { from { opacity: .15; } }
-  @keyframes drift { to { transform: translateX(40px); } }
-  @keyframes bird { to { transform: translate(-90px, 12px); } }
-  @keyframes glint { from { opacity: .15; } }
-  @keyframes wave { to { stroke-dashoffset: var(--d); } }
-  @keyframes beam { from { transform: rotate(-9deg); } to { transform: rotate(7deg); } }
-  @keyframes lamp { from { opacity: .55; } to { opacity: 1; } }
-  @keyframes drop { to { transform: translate(-20px, 60px); } }
-  @keyframes flash { 0%, 91%, 93.5%, 95%, 100% { opacity: 0; } 92% { opacity: .55; } 94.2% { opacity: .35; } }
-  @media (prefers-reduced-motion: reduce) { * { animation: none !important; } .flash { opacity: 0; } }
-  .mood { font: 400 23px ${SERIF}; fill: ${c.text}; }
-  .meta { font: 400 17px ${MONO}; fill: ${c.muted}; }
-</style>
-<defs>${s.defs}</defs>
-${s.body}
-<text class="mood" x="4" y="${SH + 42}">${esc(caption.mood)}</text>
-<text class="meta" x="4" y="${SH + 75}">${esc(caption.meta)}</text>
-<text class="meta" x="${W - 4}" y="${SH + 75}" text-anchor="end">${esc(caption.note)}</text>
-</svg>`;
+// A line set at a baseline. `anchor` is where x falls on it: start, middle or end.
+function line(text, styleName, x, baseline, fill, anchor = "start") {
+  const style = SITE.styles[styleName];
+  const { run, width } = shape(text, styleName);
+  const left = x - (anchor === "end" ? width : anchor === "middle" ? width / 2 : 0);
+  const scale = style.px / style.upem;
+  const uses = run
+    .filter(({ key }) => style.glyphs[key][1])
+    .map(({ key, x: gx }) => `<use href="#${glyphId(styleName, key)}" x="${gx}"/>`).join("");
+  return `<g fill="${fill}" transform="translate(${n1(left)},${n1(baseline)}) scale(${scale},${-scale})">${uses}</g>`;
+}
+
+// Breaks a sentence into lines no longer than the site's measure.
+function wrap(text, styleName, maxWidth) {
+  const lines = [];
+  for (const word of text.split(" ")) {
+    const candidate = lines.length ? `${lines.at(-1)} ${word}` : word;
+    if (lines.length && shape(candidate, styleName).width <= maxWidth) lines[lines.length - 1] = candidate;
+    else lines.push(word);
+  }
+  return lines;
+}
+
+// ------------------------------------------------------------------ drawing
+// As wide as the site's text column, so on a desktop the picture is shown at
+// its own size and the type in it is the size the site sets it at.
+const W = SITE.measure;
+const DEGREE = 1; // px of height per degree of elevation
+// The highest the sun ever stands here, at noon on the June solstice. The
+// chart is drawn to hold it, so the curve's height through the year is real.
+const ZENITH = Math.ceil(90 - PLACE.lat + 23.44);
+
+const LABEL_BASELINE = 13;
+const CHART_TOP = 62; // below the labels and the time over the now-line
+const HORIZON = CHART_TOP + ZENITH * DEGREE;
+const CHART_BOTTOM = HORIZON + ZENITH * DEGREE;
+const AXIS_BASELINE = CHART_BOTTOM + 30;
+const PROSE_TOP = AXIS_BASELINE + 26;
+
+function almanac(theme, { t, events, phase, text }) {
+  const c = SITE.palette[theme];
+  const midnight = Math.floor(t.local / DAY) * DAY;
+  const offset = t.local - t.utc;
+  const xAt = (local) => ((local - midnight) / DAY) * W;
+  const yAt = (degrees) => HORIZON - degrees * DEGREE;
+  const parts = [];
+
+  // What is drawn where: place on the left, the date on the right.
+  const date = new Intl.DateTimeFormat("en-GB", { timeZone: "UTC", weekday: "long", day: "numeric", month: "long" }).format(new Date(t.local));
+  parts.push(line(`${PLACE.name}, ${PLACE.country}`.toUpperCase(), "label", 0, LABEL_BASELINE, c.muted));
+  parts.push(line(date.replace(",", "").toUpperCase(), "label", W, LABEL_BASELINE, c.muted, "end"));
+
+  // The sun's path over the whole day: drawn in full above the horizon, and
+  // dotted below it, where it is real but cannot be seen.
+  const path = [];
+  for (let m = 0; m <= 24 * 60; m += 10) {
+    const local = midnight + m * MIN;
+    path.push(`${path.length ? "L" : "M"}${n1(xAt(local))} ${n1(yAt(sunElevation(local - offset)))}`);
+  }
+  parts.push(
+    `<clipPath id="up"><rect width="${W}" height="${HORIZON}"/></clipPath>`,
+    `<clipPath id="down"><rect y="${HORIZON}" width="${W}" height="${CHART_BOTTOM - HORIZON + 2}"/></clipPath>`,
+    `<path d="${path.join("")}" fill="none" stroke="${c.muted}" stroke-width="1" stroke-dasharray="1 4" stroke-linecap="round" clip-path="url(#down)"/>`,
+    `<path d="${path.join("")}" fill="none" stroke="${c.fg}" stroke-width="1.25" clip-path="url(#up)"/>`,
+    `<path d="M0 ${HORIZON}.5H${W}" stroke="${c.muted}" stroke-width="1"/>`,
+  );
+
+  // Now: the present hour, and the heights the sun and the moon stand at. The
+  // moon follows the sun's path but runs late by its age, so its height is
+  // the sun's that much of a day ago.
+  const x = Math.min(W - 7, Math.max(7, xAt(t.local)));
+  const sun = sunElevation(t.utc), moon = sunElevation(t.utc - phase.p * DAY);
+
+  // Sunrise and sunset: a tick on the horizon and the time beside it, below
+  // the line on the daylight side, where the path is overhead and the space
+  // is empty. If the present hour falls on that spot, the time moves to the
+  // empty space on the other side: above the line, over the night.
+  for (const e of events.filter((e) => sameDay(e.at, t.local))) {
+    const tick = Math.round(xAt(e.at)) + 0.5;
+    const toDay = e.kind === "rise" ? 1 : -1;
+    const taken = (x - tick) * toDay > -12 && (x - tick) * toDay < shape(clock(e.at), "meta").width + 19;
+    const side = taken ? -toDay : toDay;
+    parts.push(`<path d="M${tick} ${HORIZON - 4}V${HORIZON + 5}" stroke="${c.muted}" stroke-width="1"/>`);
+    parts.push(line(clock(e.at), "meta", tick + side * 7, taken ? HORIZON - 8 : HORIZON + 19, c.muted, side > 0 ? "start" : "end"));
+  }
+
+  // The hours, along the bottom.
+  for (let h = 0; h <= 24; h++) {
+    const x = Math.min(W - 0.5, Math.round((h / 24) * W) + 0.5);
+    const major = h % 6 === 0;
+    parts.push(`<path d="M${x} ${CHART_BOTTOM + 8}v${major ? 7 : 3}" stroke="${c.muted}" stroke-width="1"/>`);
+    if (major) parts.push(line(String(h).padStart(2, "0"), "meta", h === 0 ? 0 : h === 24 ? W : x, AXIS_BASELINE + 4, c.muted, h === 0 ? "start" : h === 24 ? "end" : "middle"));
+  }
+
+  // A hairline at the present hour, down to whichever of the two is lower.
+  const hair = Math.round(x) + 0.5;
+  parts.push(`<path d="M${hair} ${CHART_TOP - 6}V${n1(Math.max(HORIZON, yAt(sun), yAt(moon)))}" stroke="${c.rule}" stroke-width="1"/>`);
+  parts.push(line(clock(t.local), "meta", Math.min(W - 19, Math.max(19, x)), CHART_TOP - 14, c.fg, "middle"));
+
+  // The moon, as it looks: a ring with its lit part filled in. The bright limb
+  // faces the sun, which is to the right of a waxing moon seen from the north.
+  {
+    const y = yAt(moon), r = 6;
+    const rx = n1(r * Math.abs(1 - 2 * phase.lit));
+    const right = phase.waxing;
+    const term = (phase.lit < 0.5) === right ? 0 : 1;
+    const lit = `M${n1(x)} ${n1(y - r)}A${r} ${r} 0 0 ${right ? 1 : 0} ${n1(x)} ${n1(y + r)}A${rx} ${r} 0 0 ${term} ${n1(x)} ${n1(y - r)}Z`;
+    if (phase.lit >= 0.02) parts.push(`<path d="${lit}" fill="${c.fg}"/>`);
+    parts.push(`<circle cx="${n1(x)}" cy="${n1(y)}" r="${r - 0.5}" fill="none" stroke="${c.fg}" stroke-width="1"/>`);
+  }
+
+  // The sun, in the one colour: solid while it is up, a ring once it has set.
+  parts.push(sun >= 0
+    ? `<circle cx="${n1(x)}" cy="${n1(yAt(sun))}" r="5" fill="${c.accent}"/>`
+    : `<circle cx="${n1(x)}" cy="${n1(yAt(sun))}" r="4.25" fill="none" stroke="${c.accent}" stroke-width="1.5"/>`);
+
+  // The sentence, set like a lead paragraph and kept to the measure.
+  const prose = SITE.styles.prose, leading = prose.px * prose.lineHeight;
+  const lines = wrap(text, "prose", W);
+  const firstBaseline = PROSE_TOP + (leading - (prose.ascender - prose.descender) * prose.px / prose.upem) / 2 + prose.ascender * prose.px / prose.upem;
+  lines.forEach((l, i) => parts.push(line(l, "prose", 0, firstBaseline + i * leading, c.fg)));
+
+  const height = Math.ceil(PROSE_TOP + lines.length * leading);
+  return { height, body: parts.join("\n") };
+}
+
+function svg(theme, scene) {
+  defs.clear();
+  const { height, body } = almanac(theme, scene);
+  const glyphs = [...defs].map(([id, d]) => `<path id="${id}" d="${d}"/>`).join("");
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${height}" width="${W}" height="${height}" role="img" aria-labelledby="t">
+<!-- Drawn by scripts/window.mjs. The type is mohanadtarek.com's, traced by scripts/type.py. -->
+<title id="t">${esc(scene.alt)}</title>
+<defs>${glyphs}</defs>
+${body}
+</svg>
+`;
 }
 
 // ------------------------------------------------------------------ go
 const t = now();
 const { weather, events } = await lookOutside(t);
-const m = moment(t, events);
 const phase = moonPhase(t.utc);
-const moon = { ...phase, ...moonArc(t, events, phase.p) };
-const code = weather?.code;
-const mood = code == null ? m.mood : isStorm(code) ? "storm" : isRain(code) ? "rain" : isFog(code) ? "fog" : m.mood;
-const hhmm = new Date(t.local).toISOString().slice(11, 16);
-const meta = [PLACE.name, weather && `${Math.round(weather.temp)}°C`, weather && SKY_WORDS[code]].filter(Boolean).join("  ·  ");
-const caption = {
-  meta, mood: MOODS[mood], note: `looked outside at ${hhmm}`,
-  alt: `A window over the sea in ${PLACE.name} at ${hhmm}${weather ? `, ${SKY_WORDS[code]}` : ""}. ${MOODS[mood]}`,
+const text = sentences(t, weather, events, phase);
+const scene = {
+  t, events, phase, text,
+  alt: `The sun's path over ${PLACE.name} today, with the sun and the moon where they stand at ${clock(t.local)}. ${text}`,
 };
-const s = scene({ m, weather, moon, day: Math.floor(t.local / DAY) });
 
 await mkdir(OUT, { recursive: true });
-for (const theme of Object.keys(THEMES)) await writeFile(new URL(`window-${theme}.svg`, OUT), svg(theme, s, caption));
-console.log(`${hhmm} · ${mood} · elevation ${n1(m.elev)} · moon ${Math.round(moon.lit * 100)}% · ${meta}`);
+for (const theme of Object.keys(SITE.palette)) await writeFile(new URL(`window-${theme}.svg`, OUT), svg(theme, scene));
+console.log(`${clock(t.local)} · sun ${n1(sunElevation(t.utc))}° · moon ${Math.round(phase.lit * 100)}% · ${text}`);
